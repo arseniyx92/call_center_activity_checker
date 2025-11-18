@@ -14,7 +14,7 @@ BOT_PID=$!
 sleep 3
 
 # Start main script (in foreground)
-python3 main_script.py
+python3 main.py
 
 # When main script exits, also kill the bot
 kill $BOT_PID
