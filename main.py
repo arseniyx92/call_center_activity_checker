@@ -4,9 +4,12 @@ import os
 from tg_logger import set_application, Log_in_tg
 from telegram.ext import Application
 from dotenv import load_dotenv
+from llm_stt import transcribe_mp3
 
 # Load environment variables
 load_dotenv()
+
+recordings_dir = os.getenv('RECORDINGS_DIR')
 
 def setup_telegram():
     """Set up Telegram application"""
@@ -22,10 +25,20 @@ def setup_telegram():
 async def main():
     calls = hosted_pbx.get_call_history()
     if calls['error'] is not None:
-        await Log_in_tg(f"❌ PBX_API_ERROR: {calls.error}")
+        await Log_in_tg(f"❌ PBX API ERROR: {calls.error}")
+        return
 
     await Log_in_tg(f"{calls['info'][-1]}")
-    hosted_pbx.download_recording(calls['info'][-1]['record'], 'recording.mp3')
+    download_link = calls['info'][-1]['record']
+    filename = 'recording.mp3'
+    stt_result = None
+    if hosted_pbx.download_recording(download_link, filename) == False:
+        await Log_in_tg(f"❌ DOWNLOAD ERROR: Couldn't download file by this link {download_link}")
+        return
+    stt_result = transcribe_mp3(f'{recordings_dir}/recording.mp3')
+    print(stt_result)
+    await Log_in_tg(stt_result)
+
 
 if __name__ == "__main__":
     setup_telegram()
