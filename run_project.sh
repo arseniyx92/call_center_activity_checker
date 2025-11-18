@@ -1,5 +1,9 @@
 #!/bin/bash
 
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
 # Start Telegram bot in background
 python3 tg_bot_core.py &
 
