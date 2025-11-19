@@ -9,7 +9,7 @@ load_dotenv()
 domain = os.getenv('GRAVITEL_DOMAIN')
 api_key = os.getenv('GRAVITEL_API_KEY')
 base_url = f"https://crm.aicall.ru/v1/{domain}/history"
-recordings_dir = 'recordings'
+recordings_dir = os.getenv('RECORDINGS_DIR')
 
 headers = {
     "X-API-KEY": api_key,
