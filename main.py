@@ -11,6 +11,10 @@ load_dotenv()
 
 recordings_dir = os.getenv('RECORDINGS_DIR')
 
+def get_record_name(call):
+    record_name = f"{call['start']}_{call['type']}_{call['id']}"
+    return record_name
+
 def setup_telegram():
     """Set up Telegram application"""
     BOT_TOKEN = os.getenv("LOG_BOT_TOKEN")
@@ -30,12 +34,12 @@ async def main():
 
     await Log_in_tg(f"{calls['info'][-1]}")
     download_link = calls['info'][-1]['record']
-    filename = 'recording.mp3'
+    filename = get_record_name(calls['info'][-1])
     stt_result = None
     if hosted_pbx.download_recording(download_link, filename) == False:
         await Log_in_tg(f"❌ DOWNLOAD ERROR: Couldn't download file by this link {download_link}")
         return
-    stt_result = transcribe_mp3(f'{recordings_dir}/recording.mp3')
+    stt_result = transcribe_mp3(f'{recordings_dir}/{filename}')
     print(stt_result)
     await Log_in_tg(stt_result)
 
