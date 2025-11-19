@@ -1,11 +1,11 @@
 """
-RAG-модуль для коррекции и обогащения транскрипций телефонных звонков.
+Модуль для коррекции и обогащения транскрипций телефонных звонков в медицинском call-центре.
 
-Модуль использует Retrieval-Augmented Generation для:
+Модуль использует LLM и RAG для:
 - Исправления ошибок распознавания речи
-- Извлечения сущностей (имена, телефоны, заказы)
+- Извлечения информации о записи к врачу (врач, специальность, дата/время) с использованием RAG из Google Sheets
+- Проверки доступности врача через Google Sheets (RAG с таблицей)
 - Классификации звонков
-- Резюмирования разговоров
 """
 
 import os
@@ -13,94 +13,119 @@ import json
 import time
 from typing import Dict, List, Optional, Any
 from dotenv import load_dotenv
+from openai import OpenAI
+
+# Google Sheets интеграция
+try:
+    from google_sheets import DoctorsSchedule
+    GOOGLE_SHEETS_AVAILABLE = True
+except ImportError:
+    GOOGLE_SHEETS_AVAILABLE = False
+    print("⚠️ Модуль google_sheets недоступен")
 
 # Загрузка переменных окружения
 load_dotenv()
 
-# Импорты для RAG (раскомментировать при установке зависимостей)
-# from sentence_transformers import SentenceTransformer
-# import chromadb
-# from langchain.llms import OpenAI
-# from langchain.chat_models import ChatOpenAI
-
 
 class CallCorrector:
     """
-    Класс для коррекции и обогащения транскрипций звонков с использованием RAG.
+    Класс для коррекции и обогащения транскрипций звонков с проверкой врачей через Google Sheets.
     """
     
     def __init__(
         self,
-        embedding_model: Optional[str] = None,
         llm_model: Optional[str] = None,
-        vector_db_path: str = "vector_db",
         use_cache: bool = True
     ):
         """
         Инициализация модуля коррекции.
         
         Args:
-            embedding_model: Модель для создания эмбеддингов
             llm_model: Модель LLM для коррекции
-            vector_db_path: Путь к векторной БД
             use_cache: Использовать ли кэширование
         """
-        self.embedding_model_name = embedding_model or "paraphrase-multilingual-MiniLM-L12-v2"
         self.llm_model = llm_model or "gpt-3.5-turbo"
-        self.vector_db_path = vector_db_path
         self.use_cache = use_cache
         
-        # Инициализация компонентов (заглушки для начала)
-        self.embedding_model = None
-        self.vector_db = None
+        # Инициализация компонентов
         self.llm = None
         self.cache = {} if use_cache else None
         
-        # Инициализация при первом использовании
-        # self._initialize_components()
+        # Google Sheets для проверки врачей
+        self.doctors_schedule = None
+        
+        # Инициализация при создании экземпляра
+        self._initialize_components()
     
     def _initialize_components(self):
-        """Инициализация всех компонентов RAG."""
-        # TODO: Раскомментировать после установки зависимостей
-        # try:
-        #     # Инициализация модели эмбеддингов
-        #     self.embedding_model = SentenceTransformer(self.embedding_model_name)
-        #     
-        #     # Инициализация векторной БД
-        #     self.vector_db = chromadb.PersistentClient(path=self.vector_db_path)
-        #     self.collection = self.vector_db.get_or_create_collection("call_transcriptions")
-        #     
-        #     # Инициализация LLM
-        #     api_key = os.getenv("OPENAI_API_KEY")
-        #     if api_key:
-        #         self.llm = ChatOpenAI(model_name=self.llm_model, temperature=0.3)
-        #     else:
-        #         print("⚠️ OPENAI_API_KEY не найден, LLM функции будут недоступны")
-        #         
-        # except Exception as e:
-        #     print(f"⚠️ Ошибка инициализации компонентов: {e}")
-        #     print("Работа в режиме заглушек")
-        pass
+        """Инициализация всех компонентов."""
+        try:
+            # Инициализация OpenAI клиента
+            api_key = os.getenv("OPENAI_API_KEY")
+            if api_key:
+                self.llm = OpenAI(api_key=api_key)
+                print(f"✅ LLM инициализирован: {self.llm_model}")
+            else:
+                print("⚠️ OPENAI_API_KEY не найден, LLM функции будут недоступны")
+                
+        except Exception as e:
+            print(f"⚠️ Ошибка инициализации LLM: {e}")
+            self.llm = None
+        
+        # Инициализация Google Sheets
+        if GOOGLE_SHEETS_AVAILABLE:
+            try:
+                self.doctors_schedule = DoctorsSchedule()
+                if self.doctors_schedule.doctors_worksheet:
+                    print("✅ Подключение к Google Sheets установлено")
+            except Exception as e:
+                print(f"⚠️ Ошибка подключения к Google Sheets: {e}")
+    
+    def _call_llm(self, prompt: str, temperature: float = 0.3) -> str:
+        """
+        Вызов LLM для генерации ответа.
+        
+        Args:
+            prompt: Промпт для LLM
+            temperature: Температура генерации (0.0-2.0)
+            
+        Returns:
+            Ответ от LLM
+        """
+        if not self.llm:
+            return ""
+        
+        try:
+            response = self.llm.chat.completions.create(
+                model=self.llm_model,
+                messages=[
+                    {"role": "system", "content": "Ты - эксперт по обработке транскрипций телефонных звонков в медицинском call-центре для записи на прием к врачу."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            print(f"❌ Ошибка вызова LLM: {e}")
+            return ""
     
     def process_call(
         self,
         transcription: str,
         call_metadata: Dict[str, Any],
-        include_similar: bool = True,
         include_entities: bool = True,
         include_classification: bool = True,
-        include_summary: bool = True
+        verify_doctor: bool = True
     ) -> Dict[str, Any]:
         """
-        Полная обработка звонка: коррекция и обогащение.
+        Полная обработка звонка: коррекция и обогащение с проверкой врача.
         
         Args:
             transcription: Сырая транскрипция из STT
             call_metadata: Метаданные звонка (id, client, duration, etc.)
-            include_similar: Включать ли поиск похожих звонков
             include_entities: Извлекать ли сущности
             include_classification: Классифицировать ли звонок
-            include_summary: Создавать ли резюме
+            verify_doctor: Проверять ли врача в Google Sheets
             
         Returns:
             Словарь с обогащенными данными
@@ -113,58 +138,40 @@ class CallCorrector:
             "processing_steps": []
         }
         
-        # Этап 1: Поиск похожих звонков (RAG Retrieval)
-        similar_calls = []
-        if include_similar:
-            similar_calls = self._find_similar_calls(transcription, top_k=5)
-            result["similar_calls"] = similar_calls
-            result["processing_steps"].append("similar_calls_search")
-        
-        # Этап 2: Коррекция транскрипции
+        # Этап 1: Коррекция транскрипции
         corrected_transcription = self._correct_transcription(
             transcription=transcription,
-            similar_calls=similar_calls,
             call_metadata=call_metadata
         )
         result["corrected_transcription"] = corrected_transcription
         result["processing_steps"].append("correction")
         
-        # Этап 3: Извлечение сущностей
-        entities = {}
+        # Этап 2: Извлечение информации о записи к врачу (с RAG)
+        appointment_info = {}
         if include_entities:
-            entities = self._extract_entities(corrected_transcription)
-            result["entities"] = entities
-            result["processing_steps"].append("entity_extraction")
+            appointment_info = self._extract_appointment_info(corrected_transcription)
+            result["appointment_info"] = appointment_info
+            result["processing_steps"].append("appointment_extraction_with_rag")
+            
+            # Этап 2.1: Проверка врача в Google Sheets (RAG с таблицей)
+            if verify_doctor and self.doctors_schedule:
+                doctor_verification = self._verify_doctor_availability(
+                    appointment_info,
+                    corrected_transcription
+                )
+                result["doctor_verification"] = doctor_verification
+                result["processing_steps"].append("doctor_verification")
         
-        # Этап 4: Классификация
+        # Этап 3: Классификация
         classification = {}
         if include_classification:
             classification = self._classify_call(
                 corrected_transcription,
-                call_metadata
+                call_metadata,
+                appointment_info
             )
             result["classification"] = classification
             result["processing_steps"].append("classification")
-        
-        # Этап 5: Резюмирование
-        summary = {}
-        if include_summary:
-            summary = self._summarize_call(
-                corrected_transcription,
-                call_metadata,
-                classification
-            )
-            result["summary"] = summary
-            result["processing_steps"].append("summarization")
-        
-        # Сохранение в векторную БД для будущих поисков
-        if self.vector_db:
-            self._save_to_vector_db(
-                transcription=corrected_transcription,
-                call_metadata=call_metadata,
-                entities=entities,
-                classification=classification
-            )
         
         # Метаданные обработки
         result["metadata"] = {
@@ -175,75 +182,22 @@ class CallCorrector:
         
         return result
     
-    def _find_similar_calls(
-        self,
-        transcription: str,
-        top_k: int = 5,
-        similarity_threshold: float = 0.7
-    ) -> List[Dict[str, Any]]:
-        """
-        Поиск похожих звонков в векторной БД (RAG Retrieval).
-        
-        Args:
-            transcription: Транскрипция для поиска
-            top_k: Количество похожих звонков
-            similarity_threshold: Минимальный порог схожести
-            
-        Returns:
-            Список похожих звонков с метаданными
-        """
-        if not self.embedding_model or not self.vector_db:
-            # Заглушка: возвращаем пустой список
-            print("⚠️ Векторная БД не инициализирована, похожие звонки не найдены")
-            return []
-        
-        try:
-            # Создание эмбеддинга для текущей транскрипции
-            query_embedding = self.embedding_model.encode(transcription)
-            
-            # Поиск в векторной БД
-            # TODO: Реализовать поиск через Chroma/Qdrant
-            # results = self.collection.query(
-            #     query_embeddings=[query_embedding.tolist()],
-            #     n_results=top_k
-            # )
-            
-            # Фильтрация по порогу схожести
-            similar_calls = []
-            # for i, distance in enumerate(results['distances'][0]):
-            #     if 1 - distance >= similarity_threshold:  # Преобразуем расстояние в схожесть
-            #         similar_calls.append({
-            #             "call_id": results['ids'][0][i],
-            #             "similarity": 1 - distance,
-            #             "transcription": results['documents'][0][i],
-            #             "metadata": results['metadatas'][0][i]
-            #         })
-            
-            return similar_calls
-            
-        except Exception as e:
-            print(f"❌ Ошибка поиска похожих звонков: {e}")
-            return []
-    
     def _correct_transcription(
         self,
         transcription: str,
-        similar_calls: List[Dict[str, Any]],
         call_metadata: Dict[str, Any]
     ) -> str:
         """
-        Коррекция транскрипции с использованием LLM и контекста из похожих звонков.
+        Коррекция транскрипции с использованием LLM.
         
         Args:
             transcription: Сырая транскрипция
-            similar_calls: Список похожих звонков для контекста
             call_metadata: Метаданные звонка
             
         Returns:
             Исправленная транскрипция
         """
         if not self.llm:
-            # Заглушка: возвращаем исходный текст
             print("⚠️ LLM не инициализирован, коррекция не выполнена")
             return transcription
         
@@ -253,38 +207,29 @@ class CallCorrector:
             return self.cache[cache_key]
         
         try:
-            # Подготовка контекста из похожих звонков
-            similar_context = ""
-            if similar_calls:
-                similar_context = "\n\nПохожие звонки для контекста:\n"
-                for i, call in enumerate(similar_calls[:3], 1):
-                    similar_context += f"{i}. {call.get('transcription', '')[:200]}...\n"
-            
             # Подготовка промпта
-            prompt = f"""Ты - эксперт по коррекции транскрипций телефонных звонков.
+            prompt = f"""Ты - эксперт по коррекции транскрипций телефонных звонков в медицинском call-центре.
 
 Исходная транскрипция:
 {transcription}
-{similar_context}
 
 Задача:
 1. Исправь все ошибки распознавания речи
-2. Приведи термины к правильному написанию
-3. Исправь имена собственные (заглавные буквы)
-4. Нормализуй числа и даты
+2. Приведи медицинские термины к правильному написанию
+3. Исправь имена врачей и пациентов (заглавные буквы)
+4. Нормализуй даты и время записи
 5. Удали паразитные слова ("эээ", "ммм", повторы)
 6. Сохрани стиль разговорной речи
 7. Не меняй смысл и структуру диалога
 
-Исправленная транскрипция:"""
+Верни ТОЛЬКО исправленную транскрипцию без дополнительных комментариев:"""
             
             # Вызов LLM
-            # TODO: Реализовать вызов через LangChain
-            # response = self.llm.predict(prompt)
-            # corrected = response.strip()
+            corrected = self._call_llm(prompt, temperature=0.2)
             
-            # Заглушка
-            corrected = transcription
+            # Если LLM не вернул результат, возвращаем исходный текст
+            if not corrected:
+                corrected = transcription
             
             # Сохранение в кэш
             if self.cache:
@@ -296,75 +241,241 @@ class CallCorrector:
             print(f"❌ Ошибка коррекции транскрипции: {e}")
             return transcription
     
-    def _extract_entities(self, transcription: str) -> Dict[str, Any]:
+    def _extract_appointment_info(self, transcription: str) -> Dict[str, Any]:
         """
-        Извлечение сущностей из транскрипции (NER).
+        Извлечение информации о записи к врачу из транскрипции с использованием RAG.
         
         Args:
             transcription: Исправленная транскрипция
             
         Returns:
-            Словарь с извлеченными сущностями
+            Словарь с информацией о записи
         """
         if not self.llm:
-            print("⚠️ LLM не инициализирован, извлечение сущностей не выполнено")
+            print("⚠️ LLM не инициализирован, извлечение информации о записи не выполнено")
             return {}
         
         try:
-            prompt = f"""Извлеки из следующего текста все сущности:
+            # RAG: Получаем контекст о врачах из Google Sheets
+            doctors_context = ""
+            if self.doctors_schedule:
+                doctors_context = self.doctors_schedule.get_context_for_rag()
+            
+            # Подготовка промпта с RAG контекстом
+            if doctors_context and doctors_context != "База данных врачей недоступна":
+                prompt = f"""Извлеки из следующего текста информацию о записи на прием к врачу.
+
+Доступные врачи в базе данных:
+{doctors_context}
+
+Текст разговора:
+{transcription}
+
+Задача:
+1. ФИО врача - извлеки точное имя из текста, если упоминается, используй контекст из базы данных для уточнения
+2. Специальность врача - определи специальность (терапевт, кардиолог, стоматолог и т.д.), используй контекст из базы для проверки
+3. Дата записи - день недели или конкретная дата (если упоминается)
+4. Время записи - нормализуй в формат "HH" или "HH:MM" (например, "два часа" → "14", "14:00" → "14")
+5. Имя пациента - если упоминается
+6. Телефон пациента - если упоминается
+7. Жалоба или причина обращения - кратко
+
+Важно: Используй контекст из базы данных для правильного определения имени и специальности врача.
+
+Верни ТОЛЬКО валидный JSON без дополнительного текста:
+{{
+  "doctor_name": "",
+  "doctor_specialty": "",
+  "appointment_date": "",
+  "appointment_time": "",
+  "patient_name": "",
+  "patient_phone": "",
+  "reason": ""
+}}"""
+            else:
+                # Если Google Sheets недоступен, используем промпт без контекста
+                prompt = f"""Извлеки из следующего текста информацию о записи на прием к врачу:
 
 Текст:
 {transcription}
 
 Извлеки:
-1. Имена людей (клиенты, сотрудники)
-2. Телефоны и email
-3. Номера заказов, договоров, счетов
-4. Суммы денег
-5. Даты и время
-6. Адреса
+1. ФИО врача (если упоминается)
+2. Специальность врача (терапевт, кардиолог, стоматолог и т.д.)
+3. Дата записи (день недели или конкретная дата)
+4. Время записи (например, "14:00", "два часа дня") - нормализуй в формат "HH"
+5. Имя пациента (если упоминается)
+6. Телефон пациента
+7. Жалоба или причина обращения (кратко)
 
-Формат ответа: JSON
+Верни ТОЛЬКО валидный JSON без дополнительного текста:
 {{
-  "persons": [],
-  "contacts": {{"phones": [], "emails": []}},
-  "orders": [],
-  "amounts": [],
-  "dates": [],
-  "addresses": []
+  "doctor_name": "",
+  "doctor_specialty": "",
+  "appointment_date": "",
+  "appointment_time": "",
+  "patient_name": "",
+  "patient_phone": "",
+  "reason": ""
 }}"""
             
-            # TODO: Реализовать вызов LLM
-            # response = self.llm.predict(prompt)
-            # entities = json.loads(response)
+            # Вызов LLM
+            response = self._call_llm(prompt, temperature=0.1)
             
-            # Заглушка
-            entities = {
-                "persons": [],
-                "contacts": {"phones": [], "emails": []},
-                "orders": [],
-                "amounts": [],
-                "dates": [],
-                "addresses": []
-            }
+            # Парсинг JSON ответа
+            if response:
+                try:
+                    # Попытка извлечь JSON из ответа
+                    if "```json" in response:
+                        response = response.split("```json")[1].split("```")[0].strip()
+                    elif "```" in response:
+                        response = response.split("```")[1].split("```")[0].strip()
+                    appointment_info = json.loads(response)
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ Ошибка парсинга JSON информации о записи: {e}")
+                    appointment_info = {
+                        "doctor_name": "",
+                        "doctor_specialty": "",
+                        "appointment_date": "",
+                        "appointment_time": "",
+                        "patient_name": "",
+                        "patient_phone": "",
+                        "reason": ""
+                    }
+            else:
+                appointment_info = {
+                    "doctor_name": "",
+                    "doctor_specialty": "",
+                    "appointment_date": "",
+                    "appointment_time": "",
+                    "patient_name": "",
+                    "patient_phone": "",
+                    "reason": ""
+                }
             
-            return entities
+            return appointment_info
             
         except Exception as e:
-            print(f"❌ Ошибка извлечения сущностей: {e}")
+            print(f"❌ Ошибка извлечения информации о записи: {e}")
             return {}
+    
+    def _verify_doctor_availability(
+        self,
+        appointment_info: Dict[str, Any],
+        transcription: str
+    ) -> Dict[str, Any]:
+        """
+        Проверить доступность врача через Google Sheets (RAG с таблицей).
+        
+        Args:
+            appointment_info: Извлеченная информация о записи
+            transcription: Транскрипция для дополнительного контекста
+            
+        Returns:
+            Результат проверки доступности врача
+        """
+        if not self.doctors_schedule:
+            return {
+                "verified": False,
+                "message": "База данных врачей недоступна",
+                "doctor_info": None
+            }
+        
+        doctor_name = appointment_info.get("doctor_name", "").strip()
+        specialty = appointment_info.get("doctor_specialty", "").strip()
+        appointment_date = appointment_info.get("appointment_date", "").strip()
+        appointment_time = appointment_info.get("appointment_time", "").strip()
+        
+        if not doctor_name:
+            return {
+                "verified": False,
+                "message": "Имя врача не указано в звонке",
+                "doctor_info": None
+            }
+        
+        # Получаем контекст из Google Sheets для RAG
+        doctors_context = self.doctors_schedule.get_context_for_rag(
+            doctor_name=doctor_name if doctor_name else None,
+            specialty=specialty if specialty else None
+        )
+        
+        # Проверка доступности через Google Sheets API
+        verification_result = self.doctors_schedule.check_doctor_availability(
+            doctor_name=doctor_name,
+            specialty=specialty if specialty else None,
+            day=appointment_date if appointment_date else None,
+            time_slot=appointment_time if appointment_time else None
+        )
+        
+        # Обогащаем результат контекстом из таблицы
+        result = {
+            "verified": (
+                verification_result.get("doctor_exists", False) and
+                verification_result.get("specialty_matches", True) and  # True если не указана
+                verification_result.get("available_at_time", False)
+            ),
+            "doctor_exists": verification_result.get("doctor_exists", False),
+            "specialty_matches": verification_result.get("specialty_matches", True),
+            "available_at_time": verification_result.get("available_at_time", False),
+            "message": verification_result.get("message", ""),
+            "doctor_info": verification_result.get("doctor_info"),
+            "doctors_context": doctors_context  # RAG контекст для улучшения понимания
+        }
+        
+        # Если есть несоответствие, используем LLM с контекстом для уточнения
+        if not result["verified"] and self.llm:
+            clarification_prompt = f"""Проверка записи к врачу:
+
+Информация из звонка:
+- Врач: {doctor_name}
+- Специальность: {specialty or 'не указана'}
+- Дата: {appointment_date or 'не указана'}
+- Время: {appointment_time or 'не указана'}
+
+Информация из базы данных врачей:
+{doctors_context}
+
+Проблема: {result['message']}
+
+Проанализируй ситуацию и предложи:
+1. Существует ли такой врач?
+2. Правильна ли специальность?
+3. Доступен ли врач в указанное время?
+
+Ответ в формате JSON:
+{{
+  "doctor_exists_alternative": "",
+  "suggested_specialty": "",
+  "alternative_doctors": [],
+  "recommendation": ""
+}}"""
+            
+            clarification = self._call_llm(clarification_prompt, temperature=0.2)
+            if clarification:
+                try:
+                    if "```json" in clarification:
+                        clarification = clarification.split("```json")[1].split("```")[0].strip()
+                    elif "```" in clarification:
+                        clarification = clarification.split("```")[1].split("```")[0].strip()
+                    result["llm_clarification"] = json.loads(clarification)
+                except (json.JSONDecodeError, ValueError) as e:
+                    result["llm_clarification"] = {"recommendation": clarification}
+        
+        return result
     
     def _classify_call(
         self,
         transcription: str,
-        call_metadata: Dict[str, Any]
+        call_metadata: Dict[str, Any],
+        appointment_info: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Классификация звонка по типу, тематике, эмоциям и результату.
+        Классификация звонка в медицинском call-центре.
         
         Args:
             transcription: Исправленная транскрипция
             call_metadata: Метаданные звонка
+            appointment_info: Информация о записи
             
         Returns:
             Словарь с классификацией
@@ -374,7 +485,7 @@ class CallCorrector:
             return {}
         
         try:
-            prompt = f"""Классифицируй следующий звонок:
+            prompt = f"""Классифицируй следующий звонок в медицинском call-центре:
 
 Транскрипция:
 {transcription}
@@ -384,33 +495,54 @@ class CallCorrector:
 - Длительность: {call_metadata.get('duration', 0)} сек
 - Тип: {call_metadata.get('type', 'неизвестно')}
 
-Определи:
-1. Тип обращения (жалоба/вопрос/заказ/возврат/поддержка/другое)
-2. Тематика (доставка/оплата/качество/гарантия/возврат/статус/другое)
-3. Эмоциональная окраска (позитивная/нейтральная/негативная/очень негативная)
-4. Результат (решено/не решено/отложено/передано)
+Информация о записи:
+- Врач: {appointment_info.get('doctor_name', 'не указан')}
+- Специальность: {appointment_info.get('doctor_specialty', 'не указана')}
+- Дата: {appointment_info.get('appointment_date', 'не указана')}
 
-Ответ в формате JSON:
+Определи:
+1. Тип обращения (запись_к_врачу/консультация/отмена_записи/перенос/другое)
+2. Специальность врача (терапевт/кардиолог/стоматолог/невролог/другое)
+3. Эмоциональная окраска (позитивная/нейтральная/негативная/очень негативная)
+4. Результат (запись_создана/запись_не_создана/требуется_уточнение/отказ)
+
+Верни ТОЛЬКО валидный JSON без дополнительного текста:
 {{
   "type": "...",
-  "topic": "...",
+  "specialty": "...",
   "sentiment": "...",
   "result": "...",
   "confidence": 0.95
 }}"""
             
-            # TODO: Реализовать вызов LLM
-            # response = self.llm.predict(prompt)
-            # classification = json.loads(response)
+            # Вызов LLM
+            response = self._call_llm(prompt, temperature=0.2)
             
-            # Заглушка
-            classification = {
-                "type": "вопрос",
-                "topic": "другое",
-                "sentiment": "нейтральная",
-                "result": "решено",
-                "confidence": 0.8
-            }
+            # Парсинг JSON ответа
+            if response:
+                try:
+                    if "```json" in response:
+                        response = response.split("```json")[1].split("```")[0].strip()
+                    elif "```" in response:
+                        response = response.split("```")[1].split("```")[0].strip()
+                    classification = json.loads(response)
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ Ошибка парсинга JSON классификации: {e}")
+                    classification = {
+                        "type": "запись_к_врачу",
+                        "specialty": "другое",
+                        "sentiment": "нейтральная",
+                        "result": "требуется_уточнение",
+                        "confidence": 0.8
+                    }
+            else:
+                classification = {
+                    "type": "запись_к_врачу",
+                    "specialty": "другое",
+                    "sentiment": "нейтральная",
+                    "result": "требуется_уточнение",
+                    "confidence": 0.8
+                }
             
             return classification
             
@@ -418,198 +550,20 @@ class CallCorrector:
             print(f"❌ Ошибка классификации: {e}")
             return {}
     
-    def _summarize_call(
-        self,
-        transcription: str,
-        call_metadata: Dict[str, Any],
-        classification: Dict[str, Any]
-    ) -> Dict[str, str]:
-        """
-        Создание резюме звонка.
-        
-        Args:
-            transcription: Исправленная транскрипция
-            call_metadata: Метаданные звонка
-            classification: Результаты классификации
-            
-        Returns:
-            Словарь с резюме
-        """
-        if not self.llm:
-            print("⚠️ LLM не инициализирован, резюме не создано")
-            return {}
-        
-        try:
-            prompt = f"""Создай краткое резюме следующего звонка:
-
-Транскрипция:
-{transcription}
-
-Метаданные:
-- Клиент: {call_metadata.get('client', 'неизвестно')}
-- Длительность: {call_metadata.get('duration', 0)} сек
-- Классификация: {json.dumps(classification, ensure_ascii=False)}
-
-Создай резюме в следующем формате:
-
-КРАТКОЕ СОДЕРЖАНИЕ:
-[1-2 предложения о сути звонка]
-
-ПРОБЛЕМА КЛИЕНТА:
-[Описание проблемы, если есть]
-
-ДЕЙСТВИЯ ОПЕРАТОРА:
-[Что было сделано]
-
-РЕЗУЛЬТАТ:
-[Итог разговора]
-
-СЛЕДУЮЩИЕ ШАГИ:
-[Что нужно сделать дальше, если есть]"""
-            
-            # TODO: Реализовать вызов LLM
-            # response = self.llm.predict(prompt)
-            # summary = self._parse_summary(response)
-            
-            # Заглушка
-            summary = {
-                "brief": "Клиент обратился с вопросом",
-                "problem": "Не указана",
-                "actions": "Оператор предоставил информацию",
-                "result": "Вопрос решен",
-                "next_steps": "Нет"
-            }
-            
-            return summary
-            
-        except Exception as e:
-            print(f"❌ Ошибка создания резюме: {e}")
-            return {}
-    
-    def _parse_summary(self, summary_text: str) -> Dict[str, str]:
-        """
-        Парсинг резюме из текстового формата в структурированный.
-        
-        Args:
-            summary_text: Текст резюме от LLM
-            
-        Returns:
-            Словарь с полями резюме
-        """
-        summary = {
-            "brief": "",
-            "problem": "",
-            "actions": "",
-            "result": "",
-            "next_steps": ""
-        }
-        
-        # Простой парсинг по ключевым словам
-        lines = summary_text.split('\n')
-        current_key = None
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            
-            if 'КРАТКОЕ СОДЕРЖАНИЕ' in line.upper():
-                current_key = 'brief'
-            elif 'ПРОБЛЕМА' in line.upper():
-                current_key = 'problem'
-            elif 'ДЕЙСТВИЯ' in line.upper():
-                current_key = 'actions'
-            elif 'РЕЗУЛЬТАТ' in line.upper():
-                current_key = 'result'
-            elif 'СЛЕДУЮЩИЕ ШАГИ' in line.upper():
-                current_key = 'next_steps'
-            elif current_key and not line.startswith('[') and not line.startswith('['):
-                summary[current_key] += line + " "
-        
-        # Очистка
-        for key in summary:
-            summary[key] = summary[key].strip()
-        
-        return summary
-    
-    def _save_to_vector_db(
-        self,
-        transcription: str,
-        call_metadata: Dict[str, Any],
-        entities: Dict[str, Any],
-        classification: Dict[str, Any]
-    ):
-        """
-        Сохранение обработанного звонка в векторную БД для будущих поисков.
-        
-        Args:
-            transcription: Исправленная транскрипция
-            call_metadata: Метаданные звонка
-            entities: Извлеченные сущности
-            classification: Классификация
-        """
-        if not self.vector_db or not self.embedding_model:
-            return
-        
-        try:
-            # Создание эмбеддинга
-            embedding = self.embedding_model.encode(transcription)
-            
-            # Подготовка метаданных
-            metadata = {
-                **call_metadata,
-                "classification": json.dumps(classification, ensure_ascii=False),
-                "entities_count": len(entities.get('persons', [])) + len(entities.get('orders', []))
-            }
-            
-            # Сохранение в БД
-            # TODO: Реализовать сохранение через Chroma/Qdrant
-            # self.collection.add(
-            #     ids=[call_metadata.get('id', 'unknown')],
-            #     embeddings=[embedding.tolist()],
-            #     documents=[transcription],
-            #     metadatas=[metadata]
-            # )
-            
-        except Exception as e:
-            print(f"❌ Ошибка сохранения в векторную БД: {e}")
-    
-    def correct_text(
-        self,
-        text: str,
-        context: Optional[List[str]] = None
-    ) -> str:
+    def correct_text(self, text: str) -> str:
         """
         Упрощенная функция только для коррекции текста.
         
         Args:
             text: Текст для коррекции
-            context: Дополнительный контекст (опционально)
             
         Returns:
             Исправленный текст
         """
-        similar_calls = []
-        if context:
-            similar_calls = [{"transcription": ctx} for ctx in context]
-        
         return self._correct_transcription(
             transcription=text,
-            similar_calls=similar_calls,
             call_metadata={}
         )
-    
-    def extract_entities(self, text: str) -> Dict[str, Any]:
-        """
-        Упрощенная функция только для извлечения сущностей.
-        
-        Args:
-            text: Текст для обработки
-            
-        Returns:
-            Извлеченные сущности
-        """
-        return self._extract_entities(text)
 
 
 # Пример использования
@@ -618,7 +572,7 @@ if __name__ == "__main__":
     corrector = CallCorrector()
     
     # Пример данных
-    test_transcription = "эээ здравствуйте да я хотел бы узнать про возврат товара номер заказа орд 12345"
+    test_transcription = "эээ здравствуйте да я хотел бы записаться к врачу иванову терапевту на понедельник в два часа дня"
     test_metadata = {
         "id": "test_call_1",
         "client": "+79001234567",
@@ -629,13 +583,13 @@ if __name__ == "__main__":
     # Обработка
     result = corrector.process_call(
         transcription=test_transcription,
-        call_metadata=test_metadata
+        call_metadata=test_metadata,
+        verify_doctor=True
     )
     
     # Вывод результатов
     print("Исходная транскрипция:", result['original_transcription'])
     print("Исправленная транскрипция:", result['corrected_transcription'])
-    print("Извлеченные сущности:", json.dumps(result.get('entities', {}), ensure_ascii=False, indent=2))
-    print("Классификация:", json.dumps(result.get('classification', {}), ensure_ascii=False, indent=2))
-    print("Резюме:", json.dumps(result.get('summary', {}), ensure_ascii=False, indent=2))
-
+    print("\nИнформация о записи:", json.dumps(result.get('appointment_info', {}), ensure_ascii=False, indent=2))
+    print("\nПроверка врача:", json.dumps(result.get('doctor_verification', {}), ensure_ascii=False, indent=2))
+    print("\nКлассификация:", json.dumps(result.get('classification', {}), ensure_ascii=False, indent=2))

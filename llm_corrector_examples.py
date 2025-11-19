@@ -66,13 +66,8 @@ def example_2_only_correction():
     
     raw_text = "эээ да я хотел бы эээ узнать про доставку заказа номер орд 56789"
     
-    # Коррекция с контекстом
-    context = [
-        "Клиент спрашивает про доставку заказа ORD-56789",
-        "Вопрос о статусе доставки заказа номер 56789"
-    ]
-    
-    corrected = corrector.correct_text(text=raw_text, context=context)
+    # Коррекция текста
+    corrected = corrector.correct_text(text=raw_text)
     
     print(f"\nДо: {raw_text}")
     print(f"После: {corrected}")
@@ -160,7 +155,6 @@ def example_5_custom_configuration():
     result = corrector.process_call(
         transcription=transcription,
         call_metadata=metadata,
-        include_similar=True,      # Искать похожие
         include_entities=False,     # Не извлекать сущности
         include_classification=True, # Классифицировать
         include_summary=False       # Не создавать резюме
