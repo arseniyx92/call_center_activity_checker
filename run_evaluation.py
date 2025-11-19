@@ -86,13 +86,32 @@ class EvaluationRunner:
             Словарь с результатами оценки всех компонентов
         """
         # Обработка звонка
-        result = self.corrector.process_call(
-            transcription=transcription,
-            call_metadata={},
-            include_entities=True,
-            include_classification=True,
-            verify_doctor=True
-        )
+        try:
+            result = self.corrector.process_call(
+                transcription=transcription,
+                call_metadata={},
+                include_entities=True,
+                include_classification=True,
+                verify_doctor=True
+            )
+        except Exception as e:
+            print(f"  ⚠️ Ошибка при обработке звонка: {e}")
+            # Пробуем без проверки врача
+            try:
+                result = self.corrector.process_call(
+                    transcription=transcription,
+                    call_metadata={},
+                    include_entities=True,
+                    include_classification=True,
+                    verify_doctor=False
+                )
+            except Exception as e2:
+                print(f"  ❌ Критическая ошибка при обработке: {e2}")
+                return {
+                    "transcription": transcription[:200],
+                    "error": str(e2),
+                    "evaluations": {}
+                }
         
         evaluation_results = {
             "transcription": transcription[:200],
