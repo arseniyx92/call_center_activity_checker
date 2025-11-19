@@ -1,4 +1,4 @@
 /recordings/*
 !/recordings/recording_example.mp3
 /__pycache__
-.env
+.envcredentials.json

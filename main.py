@@ -35,21 +35,38 @@ async def main():
         await Log_in_tg(f"❌ PBX API ERROR: {calls['error']}")
         return
 
-    await Log_in_tg(f"{calls['info'][-2]}")
-    download_link = calls['info'][-2]['record']
-    filename = get_record_name(calls['info'][-2])
+    if not calls['info'] or len(calls['info']) < 2:
+        await Log_in_tg("ℹ️ Недостаточно звонков для обработки")
+        return
+    
+    last_call = calls['info'][-2]
+    await Log_in_tg(f"📞 Обрабатываем звонок:\n{last_call}")
+    
+    download_link = last_call['record']
+    filename = get_record_name(last_call)
     stt_result = None
+    
+    if not download_link:
+        await Log_in_tg("⚠️ У звонка нет записи")
+        return
+    
     if hosted_pbx.download_recording(download_link, filename) == False:
         await Log_in_tg(f"❌ DOWNLOAD ERROR: Couldn't download file by this link {download_link}")
         return
+    
     stt_result = transcribe_mp3(f'{recordings_dir}/{filename}')
+    if not stt_result:
+        await Log_in_tg("❌ STT ERROR: Не удалось распознать речь")
+        return
+    
+    print("Сырая транскрипция:")
     print(stt_result)
     
     # Отправляем сырую транскрипцию
     await Log_in_tg(f"Сырая транскрипция:\n{stt_result[:1000]}...")  # Ограничение длины
     
     # Инициализация LLM корректора с проверкой врачей
-    corrector = CallCorrector(use_cache=True)
+    corrector = CallCorrector()
     
     # Обработка через LLM с проверкой врачей
     try:
@@ -66,7 +83,11 @@ async def main():
         
         if enriched_data.get('corrected_transcription'):
             corrected = enriched_data['corrected_transcription']
-            result_message += f"Исправленная транскрипция:\n{corrected[:500]}...\n\n"
+            result_message += f"Исправленная транскрипция:\n{corrected[:1500]}...\n\n"
+        
+        if enriched_data.get('formatted_transcription'):
+            formatted = enriched_data['formatted_transcription']
+            result_message += f"Диалог (разбивка по репликам):\n{formatted[:1500]}...\n\n"
         
         # Информация о записи к врачу
         if enriched_data.get('appointment_info'):

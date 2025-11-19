@@ -23,6 +23,14 @@ except ImportError:
     GOOGLE_SHEETS_AVAILABLE = False
     print("⚠️ Модуль google_sheets недоступен")
 
+# Web Scraper интеграция
+try:
+    from web_scraper import WebScraper
+    WEB_SCRAPER_AVAILABLE = True
+except ImportError:
+    WEB_SCRAPER_AVAILABLE = False
+    print("⚠️ Модуль web_scraper недоступен")
+
 # Загрузка переменных окружения
 load_dotenv()
 
@@ -35,7 +43,6 @@ class CallCorrector:
     def __init__(
         self,
         llm_model: Optional[str] = None,
-        use_cache: bool = True
     ):
         """
         Инициализация модуля коррекции.
@@ -45,41 +52,36 @@ class CallCorrector:
             use_cache: Использовать ли кэширование
         """
         self.llm_model = llm_model or "gpt-3.5-turbo"
-        self.use_cache = use_cache
         
         # Инициализация компонентов
         self.llm = None
-        self.cache = {} if use_cache else None
         
         # Google Sheets для проверки врачей
         self.doctors_schedule = None
+        
+        # Web Scraper для получения информации с сайта
+        self.web_scraper = None
         
         # Инициализация при создании экземпляра
         self._initialize_components()
     
     def _initialize_components(self):
         """Инициализация всех компонентов."""
-        try:
-            # Инициализация OpenAI клиента
-            api_key = os.getenv("OPENAI_API_KEY")
-            if api_key:
-                self.llm = OpenAI(api_key=api_key)
-                print(f"✅ LLM инициализирован: {self.llm_model}")
-            else:
-                print("⚠️ OPENAI_API_KEY не найден, LLM функции будут недоступны")
-                
-        except Exception as e:
-            print(f"⚠️ Ошибка инициализации LLM: {e}")
-            self.llm = None
+        # Инициализация OpenAI клиента
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            self.llm = OpenAI(api_key=api_key)
+            print(f"✅ LLM инициализирован: {self.llm_model}")
         
         # Инициализация Google Sheets
         if GOOGLE_SHEETS_AVAILABLE:
-            try:
-                self.doctors_schedule = DoctorsSchedule()
-                if self.doctors_schedule.doctors_worksheet:
-                    print("✅ Подключение к Google Sheets установлено")
-            except Exception as e:
-                print(f"⚠️ Ошибка подключения к Google Sheets: {e}")
+            self.doctors_schedule = DoctorsSchedule()
+        
+        # Инициализация Web Scraper
+        if WEB_SCRAPER_AVAILABLE:
+            base_url = os.getenv('WEBSITE_BASE_URL')
+            if base_url:
+                self.web_scraper = WebScraper(base_url=base_url)
     
     def _call_llm(self, prompt: str, temperature: float = 0.3) -> str:
         """
@@ -92,22 +94,15 @@ class CallCorrector:
         Returns:
             Ответ от LLM
         """
-        if not self.llm:
-            return ""
-        
-        try:
-            response = self.llm.chat.completions.create(
-                model=self.llm_model,
-                messages=[
-                    {"role": "system", "content": "Ты - эксперт по обработке транскрипций телефонных звонков в медицинском call-центре для записи на прием к врачу."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=temperature
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            print(f"❌ Ошибка вызова LLM: {e}")
-            return ""
+        response = self.llm.chat.completions.create(
+            model=self.llm_model,
+            messages=[
+                {"role": "system", "content": "Ты - эксперт по обработке транскрипций телефонных звонков в медицинском call-центре для записи на прием к врачу."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=temperature
+        )
+        return response.choices[0].message.content.strip()
     
     def process_call(
         self,
@@ -145,6 +140,11 @@ class CallCorrector:
         )
         result["corrected_transcription"] = corrected_transcription
         result["processing_steps"].append("correction")
+        
+        # Этап 1.1: Форматирование диалога (разбивка по репликам)
+        formatted_transcription = self._format_as_dialogue(corrected_transcription)
+        result["formatted_transcription"] = formatted_transcription
+        result["processing_steps"].append("dialogue_formatting")
         
         # Этап 2: Извлечение информации о записи к врачу (с RAG)
         appointment_info = {}
@@ -197,18 +197,7 @@ class CallCorrector:
         Returns:
             Исправленная транскрипция
         """
-        if not self.llm:
-            print("⚠️ LLM не инициализирован, коррекция не выполнена")
-            return transcription
-        
-        # Проверка кэша
-        cache_key = f"correction_{hash(transcription)}"
-        if self.cache and cache_key in self.cache:
-            return self.cache[cache_key]
-        
-        try:
-            # Подготовка промпта
-            prompt = f"""Ты - эксперт по коррекции транскрипций телефонных звонков в медицинском call-центре.
+        prompt = f"""Ты - эксперт по коррекции транскрипций телефонных звонков в медицинском call-центре.
 
 Исходная транскрипция:
 {transcription}
@@ -223,23 +212,44 @@ class CallCorrector:
 7. Не меняй смысл и структуру диалога
 
 Верни ТОЛЬКО исправленную транскрипцию без дополнительных комментариев:"""
+        
+        corrected = self._call_llm(prompt, temperature=0.2)
+        return corrected or transcription
+    
+    def _format_as_dialogue(self, transcription: str) -> str:
+        """
+        Разбить транскрипцию на диалог: каждая реплика с новой строки и дефисом.
+        
+        Args:
+            transcription: Исправленная транскрипция
             
-            # Вызов LLM
-            corrected = self._call_llm(prompt, temperature=0.2)
-            
-            # Если LLM не вернул результат, возвращаем исходный текст
-            if not corrected:
-                corrected = transcription
-            
-            # Сохранение в кэш
-            if self.cache:
-                self.cache[cache_key] = corrected
-            
-            return corrected
-            
-        except Exception as e:
-            print(f"❌ Ошибка коррекции транскрипции: {e}")
+        Returns:
+            Транскрипция, отформатированная как диалог
+        """
+        if not self.llm:
             return transcription
+        
+        prompt = f"""Разбей следующий текст телефонного разговора на диалог.
+
+Текст:
+{transcription}
+
+Задача:
+1. Определи границы каждой реплики (говорящего)
+2. Каждая реплика должна начинаться с новой строки
+3. Каждая реплика должна начинаться с дефиса и пробела: "- "
+4. Сохрани все содержимое без изменений
+5. Если текст уже содержит реплики с дефисами, улучши разбивку если нужно
+
+Пример формата:
+- Реплика 1
+- Реплика 2
+- Реплика 3
+
+Верни ТОЛЬКО отформатированный диалог без дополнительных комментариев:"""
+        
+        formatted = self._call_llm(prompt, temperature=0.1)
+        return formatted or transcription
     
     def _extract_appointment_info(self, transcription: str) -> Dict[str, Any]:
         """
@@ -251,36 +261,52 @@ class CallCorrector:
         Returns:
             Словарь с информацией о записи
         """
-        if not self.llm:
-            print("⚠️ LLM не инициализирован, извлечение информации о записи не выполнено")
-            return {}
+        # RAG: Получаем контекст о врачах и расписании из Google Sheets
+        doctors_context = self.doctors_schedule.get_context_for_rag() if self.doctors_schedule else ""
         
-        try:
-            # RAG: Получаем контекст о врачах из Google Sheets
-            doctors_context = ""
-            if self.doctors_schedule:
-                doctors_context = self.doctors_schedule.get_context_for_rag()
-            
-            # Подготовка промпта с RAG контекстом
-            if doctors_context and doctors_context != "База данных врачей недоступна":
-                prompt = f"""Извлеки из следующего текста информацию о записи на прием к врачу.
+        # RAG: Получаем контекст с веб-сайта (только телефоны, адреса, услуги)
+        website_context = ""
+        if self.web_scraper:
+            scrape_url = os.getenv('WEBSITE_DOCTORS_PAGE', '/')
+            website_context = self.web_scraper.get_context_for_rag(
+                url=scrape_url,
+                keywords=["услуг", "контакт", "адрес", "телефон"],
+                max_length=1500,
+                include_doctors=False,
+                include_services=True,
+                include_contacts=True
+            )
+        
+        # Объединяем контексты
+        rag_context_parts = []
+        if doctors_context and doctors_context != "База данных врачей недоступна":
+            rag_context_parts.append(f"База данных врачей и расписание (Google Sheets):\n{doctors_context}\n")
+        if website_context and website_context not in ["Информация с сайта недоступна", "URL не указан"]:
+            rag_context_parts.append(f"Контакты и услуги клиники (с сайта):\n{website_context}\n")
+        
+        combined_context = "\n".join(rag_context_parts)
+        
+        # Подготовка промпта с RAG контекстом
+        if combined_context:
+            prompt = f"""Извлеки из следующего текста информацию о записи на прием к врачу.
 
-Доступные врачи в базе данных:
-{doctors_context}
-
+{combined_context}
 Текст разговора:
 {transcription}
 
 Задача:
-1. ФИО врача - извлеки точное имя из текста, если упоминается, используй контекст из базы данных для уточнения
-2. Специальность врача - определи специальность (терапевт, кардиолог, стоматолог и т.д.), используй контекст из базы для проверки
+1. ФИО врача - извлеки точное имя из текста, если упоминается, используй контекст из базы данных (Google Sheets) для уточнения
+2. Специальность врача - определи специальность (терапевт, кардиолог, стоматолог и т.д.), используй контекст из базы данных для проверки
 3. Дата записи - день недели или конкретная дата (если упоминается)
 4. Время записи - нормализуй в формат "HH" или "HH:MM" (например, "два часа" → "14", "14:00" → "14")
 5. Имя пациента - если упоминается
 6. Телефон пациента - если упоминается
-7. Жалоба или причина обращения - кратко
+7. Услуга - определи какую услугу запрашивает клиент, используй список услуг с сайта для уточнения
+8. Жалоба или причина обращения - кратко
 
-Важно: Используй контекст из базы данных для правильного определения имени и специальности врача.
+Важно: 
+- Используй контекст из Google Sheets для правильного определения имени и специальности врача, а также для проверки расписания
+- Используй информацию с сайта (телефоны, адреса, услуги) для валидации и уточнения данных из разговора
 
 Верни ТОЛЬКО валидный JSON без дополнительного текста:
 {{
@@ -292,9 +318,8 @@ class CallCorrector:
   "patient_phone": "",
   "reason": ""
 }}"""
-            else:
-                # Если Google Sheets недоступен, используем промпт без контекста
-                prompt = f"""Извлеки из следующего текста информацию о записи на прием к врачу:
+        else:
+            prompt = f"""Извлеки из следующего текста информацию о записи на прием к врачу:
 
 Текст:
 {transcription}
@@ -318,46 +343,24 @@ class CallCorrector:
   "patient_phone": "",
   "reason": ""
 }}"""
-            
-            # Вызов LLM
-            response = self._call_llm(prompt, temperature=0.1)
-            
-            # Парсинг JSON ответа
-            if response:
-                try:
-                    # Попытка извлечь JSON из ответа
-                    if "```json" in response:
-                        response = response.split("```json")[1].split("```")[0].strip()
-                    elif "```" in response:
-                        response = response.split("```")[1].split("```")[0].strip()
-                    appointment_info = json.loads(response)
-                except json.JSONDecodeError as e:
-                    print(f"⚠️ Ошибка парсинга JSON информации о записи: {e}")
-                    appointment_info = {
-                        "doctor_name": "",
-                        "doctor_specialty": "",
-                        "appointment_date": "",
-                        "appointment_time": "",
-                        "patient_name": "",
-                        "patient_phone": "",
-                        "reason": ""
-                    }
-            else:
-                appointment_info = {
-                    "doctor_name": "",
-                    "doctor_specialty": "",
-                    "appointment_date": "",
-                    "appointment_time": "",
-                    "patient_name": "",
-                    "patient_phone": "",
-                    "reason": ""
-                }
-            
-            return appointment_info
-            
-        except Exception as e:
-            print(f"❌ Ошибка извлечения информации о записи: {e}")
-            return {}
+        
+        response = self._call_llm(prompt, temperature=0.1)
+        
+        # Парсинг JSON ответа
+        if not response:
+            return {
+                "doctor_name": "", "doctor_specialty": "", "appointment_date": "",
+                "appointment_time": "", "patient_name": "", "patient_phone": "", "reason": ""
+            }
+        
+        # Извлечение JSON из ответа
+        if "```json" in response:
+            response = response.split("```json")[1].split("```")[0].strip()
+        elif "```" in response:
+            response = response.split("```")[1].split("```")[0].strip()
+        
+        appointment_info = json.loads(response)
+        return appointment_info
     
     def _verify_doctor_availability(
         self,
@@ -374,13 +377,6 @@ class CallCorrector:
         Returns:
             Результат проверки доступности врача
         """
-        if not self.doctors_schedule:
-            return {
-                "verified": False,
-                "message": "База данных врачей недоступна",
-                "doctor_info": None
-            }
-        
         doctor_name = appointment_info.get("doctor_name", "").strip()
         specialty = appointment_info.get("doctor_specialty", "").strip()
         appointment_date = appointment_info.get("appointment_date", "").strip()
@@ -393,25 +389,22 @@ class CallCorrector:
                 "doctor_info": None
             }
         
-        # Получаем контекст из Google Sheets для RAG
         doctors_context = self.doctors_schedule.get_context_for_rag(
-            doctor_name=doctor_name if doctor_name else None,
-            specialty=specialty if specialty else None
+            doctor_name=doctor_name or None,
+            specialty=specialty or None
         )
         
-        # Проверка доступности через Google Sheets API
         verification_result = self.doctors_schedule.check_doctor_availability(
             doctor_name=doctor_name,
-            specialty=specialty if specialty else None,
-            day=appointment_date if appointment_date else None,
-            time_slot=appointment_time if appointment_time else None
+            specialty=specialty or None,
+            day=appointment_date or None,
+            time_slot=appointment_time or None
         )
         
-        # Обогащаем результат контекстом из таблицы
         result = {
             "verified": (
                 verification_result.get("doctor_exists", False) and
-                verification_result.get("specialty_matches", True) and  # True если не указана
+                verification_result.get("specialty_matches", True) and
                 verification_result.get("available_at_time", False)
             ),
             "doctor_exists": verification_result.get("doctor_exists", False),
@@ -419,10 +412,10 @@ class CallCorrector:
             "available_at_time": verification_result.get("available_at_time", False),
             "message": verification_result.get("message", ""),
             "doctor_info": verification_result.get("doctor_info"),
-            "doctors_context": doctors_context  # RAG контекст для улучшения понимания
+            "doctors_context": doctors_context
         }
         
-        # Если есть несоответствие, используем LLM с контекстом для уточнения
+        # LLM уточнение при несоответствии
         if not result["verified"] and self.llm:
             clarification_prompt = f"""Проверка записи к врачу:
 
@@ -452,14 +445,11 @@ class CallCorrector:
             
             clarification = self._call_llm(clarification_prompt, temperature=0.2)
             if clarification:
-                try:
-                    if "```json" in clarification:
-                        clarification = clarification.split("```json")[1].split("```")[0].strip()
-                    elif "```" in clarification:
-                        clarification = clarification.split("```")[1].split("```")[0].strip()
-                    result["llm_clarification"] = json.loads(clarification)
-                except (json.JSONDecodeError, ValueError) as e:
-                    result["llm_clarification"] = {"recommendation": clarification}
+                if "```json" in clarification:
+                    clarification = clarification.split("```json")[1].split("```")[0].strip()
+                elif "```" in clarification:
+                    clarification = clarification.split("```")[1].split("```")[0].strip()
+                result["llm_clarification"] = json.loads(clarification)
         
         return result
     
@@ -480,12 +470,7 @@ class CallCorrector:
         Returns:
             Словарь с классификацией
         """
-        if not self.llm:
-            print("⚠️ LLM не инициализирован, классификация не выполнена")
-            return {}
-        
-        try:
-            prompt = f"""Классифицируй следующий звонок в медицинском call-центре:
+        prompt = f"""Классифицируй следующий звонок в медицинском call-центре:
 
 Транскрипция:
 {transcription}
@@ -514,41 +499,25 @@ class CallCorrector:
   "result": "...",
   "confidence": 0.95
 }}"""
-            
-            # Вызов LLM
-            response = self._call_llm(prompt, temperature=0.2)
-            
-            # Парсинг JSON ответа
-            if response:
-                try:
-                    if "```json" in response:
-                        response = response.split("```json")[1].split("```")[0].strip()
-                    elif "```" in response:
-                        response = response.split("```")[1].split("```")[0].strip()
-                    classification = json.loads(response)
-                except json.JSONDecodeError as e:
-                    print(f"⚠️ Ошибка парсинга JSON классификации: {e}")
-                    classification = {
-                        "type": "запись_к_врачу",
-                        "specialty": "другое",
-                        "sentiment": "нейтральная",
-                        "result": "требуется_уточнение",
-                        "confidence": 0.8
-                    }
-            else:
-                classification = {
-                    "type": "запись_к_врачу",
-                    "specialty": "другое",
-                    "sentiment": "нейтральная",
-                    "result": "требуется_уточнение",
-                    "confidence": 0.8
-                }
-            
-            return classification
-            
-        except Exception as e:
-            print(f"❌ Ошибка классификации: {e}")
-            return {}
+        
+        response = self._call_llm(prompt, temperature=0.2)
+        
+        if not response:
+            return {
+                "type": "запись_к_врачу",
+                "specialty": "другое",
+                "sentiment": "нейтральная",
+                "result": "требуется_уточнение",
+                "confidence": 0.8
+            }
+        
+        if "```json" in response:
+            response = response.split("```json")[1].split("```")[0].strip()
+        elif "```" in response:
+            response = response.split("```")[1].split("```")[0].strip()
+        
+        classification = json.loads(response)
+        return classification
     
     def correct_text(self, text: str) -> str:
         """

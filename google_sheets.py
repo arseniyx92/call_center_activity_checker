@@ -71,39 +71,14 @@ class DoctorsSchedule:
         self.doctors_worksheet = None
         self.schedule_worksheet = None
         
-        try:
-            if os.path.exists(creds_path):
-                creds = Credentials.from_service_account_file(creds_path, scopes=scope)
-                self.client = gspread.authorize(creds)
-                
-                if self.spreadsheet_id:
-                    self.spreadsheet = self.client.open_by_key(self.spreadsheet_id)
-                    
-                    # Открываем лист со справочником врачей
-                    try:
-                        self.doctors_worksheet = self.spreadsheet.worksheet(doctors_sheet)
-                        print(f"✅ Лист '{doctors_sheet}' загружен")
-                    except Exception as e:
-                        print(f"⚠️ Лист '{doctors_sheet}' не найден: {e}")
-                    
-                    # Открываем лист с расписанием
-                    try:
-                        self.schedule_worksheet = self.spreadsheet.worksheet(schedule_sheet)
-                        print(f"✅ Лист '{schedule_sheet}' загружен")
-                    except Exception as e:
-                        print(f"⚠️ Лист '{schedule_sheet}' не найден: {e}")
-                        
-                    print(f"✅ Подключение к Google Sheets установлено")
-                else:
-                    print("⚠️ GOOGLE_SHEETS_SPREADSHEET_ID не указан")
-            else:
-                print(f"⚠️ Файл credentials.json не найден по пути: {creds_path}")
-                print("Создайте сервисный аккаунт в Google Cloud Console")
-                
-        except Exception as e:
-            print(f"⚠️ Ошибка инициализации Google Sheets: {e}")
-            self.client = None
-            self.spreadsheet = None
+        if os.path.exists(creds_path):
+            creds = Credentials.from_service_account_file(creds_path, scopes=scope)
+            self.client = gspread.authorize(creds)
+            
+            if self.spreadsheet_id:
+                self.spreadsheet = self.client.open_by_key(self.spreadsheet_id)
+                self.doctors_worksheet = self.spreadsheet.worksheet(doctors_sheet)
+                self.schedule_worksheet = self.spreadsheet.worksheet(schedule_sheet)
     
     def get_all_doctors(self) -> List[Dict[str, Any]]:
         """
@@ -112,27 +87,18 @@ class DoctorsSchedule:
         Returns:
             Список словарей с информацией о врачах (name, specialty)
         """
-        if not self.doctors_worksheet:
-            return []
+        all_records = self.doctors_worksheet.get_all_records()
         
-        try:
-            # Получаем все данные (предполагаем, что первая строка - заголовки)
-            all_records = self.doctors_worksheet.get_all_records()
-            
-            doctors = []
-            for record in all_records:
-                doctor = {
-                    'name': record.get('ФИО врача', '') or record.get('Имя', '') or '',
-                    'specialty': record.get('Специальность', '') or record.get('Специализация', '') or ''
-                }
-                if doctor['name']:  # Игнорируем пустые строки
-                    doctors.append(doctor)
-            
-            return doctors
-            
-        except Exception as e:
-            print(f"❌ Ошибка получения списка врачей: {e}")
-            return []
+        doctors = []
+        for record in all_records:
+            doctor = {
+                'name': record.get('ФИО врача', '') or record.get('Имя', '') or '',
+                'specialty': record.get('Специальность', '') or record.get('Специализация', '') or ''
+            }
+            if doctor['name']:
+                doctors.append(doctor)
+        
+        return doctors
     
     def find_doctor_by_name(self, doctor_name: str) -> List[Dict[str, Any]]:
         """
@@ -220,28 +186,12 @@ class DoctorsSchedule:
         Returns:
             Номер строки (1-based) или None если время вне диапазона
         """
-        try:
-            # Парсинг времени
-            if ':' in time_slot:
-                hour = int(time_slot.split(':')[0])
-            else:
-                hour = int(time_slot)
-            
-            # Проверка диапазона
-            if hour < self.START_HOUR or hour > self.END_HOUR:
-                return None
-            
-            # Строка 1 - заголовки
-            # Строка 2 - 9:00
-            # Строка 3 - 10:00
-            # ...
-            row_index = (hour - self.START_HOUR) + 2
-            
-            return row_index
-            
-        except Exception as e:
-            print(f"⚠️ Ошибка парсинга времени '{time_slot}': {e}")
+        hour = int(time_slot.split(':')[0]) if ':' in time_slot else int(time_slot)
+        
+        if hour < self.START_HOUR or hour > self.END_HOUR:
             return None
+        
+        return (hour - self.START_HOUR) + 2
     
     def _get_doctor_column_index(self, doctor_name: str) -> Optional[int]:
         """
@@ -253,34 +203,19 @@ class DoctorsSchedule:
         Returns:
             Номер столбца (1-based, где A=1, B=2, ...) или None если врач не найден
         """
-        if not self.schedule_worksheet:
-            return None
+        header_row = self.schedule_worksheet.row_values(1)
+        doctor_name_lower = doctor_name.lower().strip()
         
-        try:
-            # Получаем заголовки (первая строка)
-            header_row = self.schedule_worksheet.row_values(1)
-            
-            # Ищем врача в заголовках (начиная со второго столбца, первый - время)
-            doctor_name_lower = doctor_name.lower().strip()
-            
-            for col_index, header in enumerate(header_row[1:], start=2):  # Начинаем с колонки B (индекс 2)
-                if header and doctor_name_lower in header.lower():
-                    # Проверяем точное совпадение с врачами из справочника
-                    found_doctors = self.find_doctor_by_name(doctor_name)
-                    if found_doctors:
-                        # Проверяем, совпадает ли заголовок с одним из найденных врачей
-                        for doctor in found_doctors:
-                            if doctor['name'].lower() in header.lower() or header.lower() in doctor['name'].lower():
-                                return col_index
-                    
-                    # Если не нашли точное совпадение, возвращаем первое частичное
-                    return col_index
-            
-            return None
-            
-        except Exception as e:
-            print(f"⚠️ Ошибка поиска столбца врача '{doctor_name}': {e}")
-            return None
+        for col_index, header in enumerate(header_row[1:], start=2):
+            if header and doctor_name_lower in header.lower():
+                found_doctors = self.find_doctor_by_name(doctor_name)
+                if found_doctors:
+                    for doctor in found_doctors:
+                        if doctor['name'].lower() in header.lower() or header.lower() in doctor['name'].lower():
+                            return col_index
+                return col_index
+        
+        return None
     
     def check_doctor_availability(
         self,
@@ -336,7 +271,6 @@ class DoctorsSchedule:
         
         # Проверка времени в расписании
         if time_slot and self.schedule_worksheet:
-            # Получаем индексы строки и столбца
             row_index = self._get_time_row_index(time_slot)
             col_index = self._get_doctor_column_index(doctor['name'])
             
@@ -350,87 +284,64 @@ class DoctorsSchedule:
                 result['doctor_info'] = doctor
                 return result
             
-            # Получаем цвет фона ячейки через Google Sheets API
-            try:
-                cell = self.schedule_worksheet.cell(row_index, col_index)
-                cell_value = cell.value
+            cell = self.schedule_worksheet.cell(row_index, col_index)
+            cell_value = cell.value
+            
+            # Получаем цвет фона через Google Sheets API
+            cell_color = None
+            spreadsheet_id = self.spreadsheet.id
+            cell_a1 = gspread.utils.rowcol_to_a1(row_index, col_index)
+            range_notation = f"{self.schedule_worksheet.title}!{cell_a1}"
+            
+            from googleapiclient.discovery import build
+            
+            credentials = None
+            if hasattr(self.client, 'auth') and hasattr(self.client.auth, 'credentials'):
+                credentials = self.client.auth.credentials
+            elif hasattr(self.client, '_session') and hasattr(self.client._session, 'credentials'):
+                credentials = self.client._session.credentials
+            
+            if credentials:
+                service = build('sheets', 'v4', credentials=credentials)
+                request = service.spreadsheets().get(
+                    spreadsheetId=spreadsheet_id,
+                    ranges=[range_notation],
+                    fields='sheets.data.rowData.values.userEnteredFormat.backgroundColor'
+                )
+                response = request.execute()
                 
-                # Получаем цвет фона через Google Sheets API
-                cell_color = None
-                try:
-                    spreadsheet_id = self.spreadsheet.id
-                    cell_a1 = gspread.utils.rowcol_to_a1(row_index, col_index)
-                    range_notation = f"{self.schedule_worksheet.title}!{cell_a1}"
-                    
-                    # Используем Google Sheets API напрямую
-                    from googleapiclient.discovery import build
-                    
-                    # Получаем credentials из gspread client
-                    credentials = None
-                    if hasattr(self.client, 'auth') and hasattr(self.client.auth, 'credentials'):
-                        credentials = self.client.auth.credentials
-                    elif hasattr(self.client, '_session') and hasattr(self.client._session, 'credentials'):
-                        credentials = self.client._session.credentials
-                    
-                    if credentials:
-                        service = build('sheets', 'v4', credentials=credentials)
-                        
-                        request = service.spreadsheets().get(
-                            spreadsheetId=spreadsheet_id,
-                            ranges=[range_notation],
-                            fields='sheets.data.rowData.values.userEnteredFormat.backgroundColor'
-                        )
-                        response = request.execute()
-                        
-                        # Извлекаем цвет фона
-                        try:
-                            sheets = response.get('sheets', [])
-                            if sheets and sheets[0].get('data'):
-                                row_data = sheets[0]['data'][0].get('rowData', [])
-                                if row_data and row_data[0].get('values'):
-                                    user_format = row_data[0]['values'][0].get('userEnteredFormat', {})
-                                    cell_color = user_format.get('backgroundColor', {})
-                        except (KeyError, IndexError, AttributeError):
-                            pass
-                    
-                except Exception as e:
-                    print(f"⚠️ Ошибка получения цвета ячейки через API: {e}")
-                    # Если не получили цвет, используем fallback
-                
-                # Определяем статус по цвету или значению
-                if cell_color:
-                    status = self._get_cell_color_status(cell_color)
+                sheets = response.get('sheets', [])
+                if sheets and sheets[0].get('data'):
+                    row_data = sheets[0]['data'][0].get('rowData', [])
+                    if row_data and row_data[0].get('values'):
+                        user_format = row_data[0]['values'][0].get('userEnteredFormat', {})
+                        cell_color = user_format.get('backgroundColor', {})
+            
+            # Определяем статус по цвету или значению
+            if cell_color:
+                status = self._get_cell_color_status(cell_color)
+            else:
+                if not cell_value or cell_value.lower() in ['свободно', 'free', '']:
+                    status = 'free'
+                elif cell_value.lower() in ['занято', 'busy', 'занят']:
+                    status = 'busy'
+                elif cell_value.lower() in ['выходной', 'holiday', 'вых']:
+                    status = 'holiday'
                 else:
-                    # Fallback: определяем по значению ячейки
-                    if not cell_value or cell_value.lower() in ['свободно', 'free', '']:
-                        status = 'free'
-                    elif cell_value.lower() in ['занято', 'busy', 'занят']:
-                        status = 'busy'
-                    elif cell_value.lower() in ['выходной', 'holiday', 'вых']:
-                        status = 'holiday'
-                    else:
-                        status = 'unknown'
-                
-                # Определяем доступность
-                result['available_at_time'] = (status == 'free')
-                
-                # Нормализуем формат времени для сообщения
-                time_display = time_slot
-                if ':' not in time_slot:
-                    time_display = f"{time_slot}:00"
-                
-                if status == 'free':
-                    result['message'] = f"✅ Врач {doctor['name']} свободен в {time_display}"
-                elif status == 'busy':
-                    result['message'] = f"❌ Врач {doctor['name']} занят в {time_display}"
-                elif status == 'holiday':
-                    result['message'] = f"🚫 Врач {doctor['name']} в выходной в {time_display}"
-                else:
-                    result['message'] = f"⚠️ Статус врача {doctor['name']} в {time_display} не определен"
-                
-            except Exception as e:
-                print(f"⚠️ Ошибка чтения ячейки расписания: {e}")
-                result['message'] = f"Ошибка проверки расписания врача {doctor['name']}"
+                    status = 'unknown'
+            
+            result['available_at_time'] = (status == 'free')
+            
+            time_display = time_slot if ':' in time_slot else f"{time_slot}:00"
+            
+            if status == 'free':
+                result['message'] = f"✅ Врач {doctor['name']} свободен в {time_display}"
+            elif status == 'busy':
+                result['message'] = f"❌ Врач {doctor['name']} занят в {time_display}"
+            elif status == 'holiday':
+                result['message'] = f"🚫 Врач {doctor['name']} в выходной в {time_display}"
+            else:
+                result['message'] = f"⚠️ Статус врача {doctor['name']} в {time_display} не определен"
         else:
             result['available_at_time'] = True  # Если время не указано, считаем доступным
             result['message'] = f"Врач {doctor['name']} найден: {doctor['specialty']}"
@@ -450,9 +361,6 @@ class DoctorsSchedule:
         Returns:
             Текст с контекстом о врачах
         """
-        if not self.doctors_worksheet:
-            return "База данных врачей недоступна"
-        
         doctors = self.get_all_doctors()
         
         if doctor_name:
@@ -464,7 +372,7 @@ class DoctorsSchedule:
             return f"Врачи не найдены (фильтр: имя='{doctor_name}', специальность='{specialty}')"
         
         context = "Информация о врачах из базы данных:\n\n"
-        for doctor in doctors[:10]:  # Ограничиваем 10 записями
+        for doctor in doctors[:10]:
             context += f"- {doctor['name']}, {doctor['specialty']}\n"
         context += "\n"
         
@@ -489,20 +397,12 @@ class DoctorsSchedule:
             return {}
         
         schedule = {}
-        try:
-            # Получаем все ячейки в столбце врача (строки со временем)
-            for hour in range(self.START_HOUR, self.END_HOUR + 1):
-                row_index = self._get_time_row_index(f"{hour}:00")
-                if row_index:
-                    try:
-                        cell = self.schedule_worksheet.cell(row_index, col_index)
-                        # Упрощенная проверка: если ячейка пустая - свободно
-                        status = 'free' if not cell.value else 'unknown'
-                        schedule[f"{hour}:00"] = status
-                    except Exception:
-                        schedule[f"{hour}:00"] = 'unknown'
-        except Exception as e:
-            print(f"⚠️ Ошибка получения расписания: {e}")
+        for hour in range(self.START_HOUR, self.END_HOUR + 1):
+            row_index = self._get_time_row_index(f"{hour}:00")
+            if row_index:
+                cell = self.schedule_worksheet.cell(row_index, col_index)
+                status = 'free' if not cell.value else 'unknown'
+                schedule[f"{hour}:00"] = status
         
         return schedule
 
