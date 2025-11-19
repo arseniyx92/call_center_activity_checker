@@ -12,7 +12,7 @@ load_dotenv()
 recordings_dir = os.getenv('RECORDINGS_DIR')
 
 def get_record_name(call):
-    record_name = f"{call['start']}_{call['type']}_{call['id']}"
+    record_name = f"{call['start']}_{call['type']}.mp3"
     return record_name
 
 def setup_telegram():
@@ -32,9 +32,9 @@ async def main():
         await Log_in_tg(f"❌ PBX API ERROR: {calls.error}")
         return
 
-    await Log_in_tg(f"{calls['info'][-1]}")
-    download_link = calls['info'][-1]['record']
-    filename = get_record_name(calls['info'][-1])
+    await Log_in_tg(f"{calls['info'][-2]}")
+    download_link = calls['info'][-2]['record']
+    filename = get_record_name(calls['info'][-2])
     stt_result = None
     if hosted_pbx.download_recording(download_link, filename) == False:
         await Log_in_tg(f"❌ DOWNLOAD ERROR: Couldn't download file by this link {download_link}")
