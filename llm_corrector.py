@@ -51,7 +51,7 @@ class CallCorrector:
             llm_model: Модель LLM для коррекции
             use_cache: Использовать ли кэширование
         """
-        self.llm_model = llm_model or "gpt-3.5-turbo"
+        self.llm_model = llm_model or "gpt-4.5"
         
         # Инициализация компонентов
         self.llm = None
@@ -141,44 +141,10 @@ class CallCorrector:
         result["corrected_transcription"] = corrected_transcription
         result["processing_steps"].append("correction")
         
-        # Этап 1.1: Форматирование диалога (разбивка по репликам)
-        formatted_transcription = self._format_as_dialogue(corrected_transcription)
-        result["formatted_transcription"] = formatted_transcription
-        result["processing_steps"].append("dialogue_formatting")
-        
-        # Этап 2: Извлечение информации о записи к врачу (с RAG)
-        appointment_info = {}
-        if include_entities:
-            appointment_info = self._extract_appointment_info(corrected_transcription)
-            result["appointment_info"] = appointment_info
-            result["processing_steps"].append("appointment_extraction_with_rag")
-            
-            # Этап 2.1: Проверка врача в Google Sheets (RAG с таблицей)
-            if verify_doctor and self.doctors_schedule:
-                doctor_verification = self._verify_doctor_availability(
-                    appointment_info,
-                    corrected_transcription
-                )
-                result["doctor_verification"] = doctor_verification
-                result["processing_steps"].append("doctor_verification")
-        
-        # Этап 3: Классификация
-        classification = {}
-        if include_classification:
-            classification = self._classify_call(
-                corrected_transcription,
-                call_metadata,
-                appointment_info
-            )
-            result["classification"] = classification
-            result["processing_steps"].append("classification")
-        
-        # Метаданные обработки
-        result["metadata"] = {
-            "processing_time": round(time.time() - start_time, 2),
-            "model_version": self.llm_model,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")
-        }
+        # # Этап 1.1: Форматирование диалога (разбивка по репликам)
+        # formatted_transcription = self._format_as_dialogue(corrected_transcription)
+        # result["formatted_transcription"] = formatted_transcription
+        # result["processing_steps"].append("dialogue_formatting")
         
         return result
     
@@ -199,17 +165,13 @@ class CallCorrector:
         """
         prompt = f"""Ты - эксперт по коррекции транскрипций телефонных звонков в медицинском call-центре.
 
-Исходная транскрипция:
-{transcription}
+Тебе пришла транскрипция звонка после обработки речи с телефонной аудио-записи разговора оператора сплошным текстом.
+Транскрипция звонка полна опечаток и семантических ошибок, ты должен привести ее к содержательному диалогу без ошибок.
+Тебе необходимо исправить все медицинские термины, все русские слова.
+Разумно преобразовать текст в диалог из двух говорящих: оператора и клиента, чтобы получился осмысленный разговор.
 
-Задача:
-1. Исправь все ошибки распознавания речи
-2. Приведи медицинские термины к правильному написанию
-3. Исправь имена врачей и пациентов (заглавные буквы)
-4. Нормализуй даты и время записи
-5. Удали паразитные слова ("эээ", "ммм", повторы)
-6. Сохрани стиль разговорной речи
-7. Не меняй смысл и структуру диалога
+Исходная плохая транскрипция:
+{transcription}
 
 Верни ТОЛЬКО исправленную транскрипцию без дополнительных комментариев:"""
         

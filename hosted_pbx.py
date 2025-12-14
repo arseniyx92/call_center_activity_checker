@@ -22,11 +22,11 @@ download_headers = {
 }
 
 # Получение истории звонков за определенный период
-def get_call_history():
+def get_call_history(start, end):
     payload = {
-        "period": "yesterday"  # today, yesterday, this_week, last_week, this_month, last_month
-        # "start": "2024-01-01T00:00:00",  # Начало периода (опционально)
-        # "end": "2024-01-31T23:59:59",    # Конец периода (опционально)
+        # "period": "yesterday"  # today, yesterday, this_week, last_week, this_month, last_month
+        "start": start,# "2024-01-01T00:00:00",  # Начало периода (опционально)
+        "end": end,# "2024-01-31T23:59:59",    # Конец периода (опционально)
         # "type": "all",  # all, in, out, missed (опционально)
         # "limit": 100     # Ограничение количества записей (опционально)
     }
@@ -46,6 +46,7 @@ def get_call_history():
             for call in calls:
                 output['info'].append({'id': call.get('id'),
                 'type': call.get('type'),
+                'result': call.get('result'),
                 'client': call.get('client'),
                 'start': call.get('start'),
                 'wait': call.get('wait'),
